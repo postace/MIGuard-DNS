@@ -4,8 +4,9 @@
 -dontskipnonpubliclibraryclasses
 -verbose
 
-# Giữ nguyên lớp dịch vụ VpnService và Activity chính
+# Giữ nguyên lớp dịch vụ VpnService, BootReceiver và Activity chính
 -keep public class com.miguard.dns.vpn.MiGuardVpnService { *; }
+-keep public class com.miguard.dns.vpn.BootReceiver { *; }
 -keep public class com.miguard.dns.MainActivity { *; }
 -keepclassmembers class com.miguard.dns.data.** { *; }
 

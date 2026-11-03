@@ -301,6 +301,9 @@ export default function App() {
   const [streamPaused, setStreamPaused] = useState<boolean>(false);
   const [logFilter, setLogFilter] = useState<'ALL' | 'BLOCKED' | 'FORWARDED'>('ALL');
   const [logSearch, setLogSearch] = useState<string>('');
+  const [longPressedLog, setLongPressedLog] = useState<DnsLogEntry | null>(null);
+  const [pressingLogId, setPressingLogId] = useState<string | null>(null);
+  const longPressTimerRef = React.useRef<number | null>(null);
 
   // Custom Blocklist Input State
   const [newDomainInput, setNewDomainInput] = useState<string>('');
@@ -651,6 +654,83 @@ export default function App() {
 
   const handleResetDefaultRules = () => {
     setRules(INITIAL_BLOCK_RULES);
+  };
+
+  const handleLogPointerDown = (entry: DnsLogEntry) => {
+    setPressingLogId(entry.id);
+    if (longPressTimerRef.current) {
+      window.clearTimeout(longPressTimerRef.current);
+    }
+    longPressTimerRef.current = window.setTimeout(() => {
+      setPressingLogId(null);
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        navigator.vibrate(40);
+      }
+      setLongPressedLog(entry);
+    }, 500);
+  };
+
+  const handleLogPointerEnd = () => {
+    if (longPressTimerRef.current) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    setPressingLogId(null);
+  };
+
+  const handleLogContextMenu = (e: React.MouseEvent, entry: DnsLogEntry) => {
+    e.preventDefault();
+    handleLogPointerEnd();
+    setLongPressedLog(entry);
+  };
+
+  const handleBlockHostFromLog = (entry: DnsLogEntry) => {
+    const cleanDomain = normalizeDomainInput(entry.domain);
+    if (!cleanDomain) return;
+
+    setRules((prev) => {
+      const existingIdx = prev.findIndex((r) => r.domain.toLowerCase() === cleanDomain);
+      if (existingIdx >= 0) {
+        return prev.map((r, idx) =>
+          idx === existingIdx ? { ...r, enabled: true } : r
+        );
+      }
+      const newRule: DomainRule = {
+        id: `log-rule-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        domain: cleanDomain,
+        enabled: true,
+        source: 'custom',
+        description: `Chặn từ nhật ký kết nối (${entry.appName} — ${entry.packageName})`,
+        hitCount: 1,
+      };
+      return [newRule, ...prev];
+    });
+
+    setLogs((prev) =>
+      prev.map((item) =>
+        item.domain.toLowerCase() === cleanDomain ||
+        item.domain.toLowerCase().endsWith(`.${cleanDomain}`)
+          ? { ...item, status: 'BLOCKED', resolvedIp: '0.0.0.0' }
+          : item
+      )
+    );
+
+    setPurgeNotice(`Đã thêm 0.0.0.0 ${cleanDomain} vào danh sách chặn.`);
+    setLongPressedLog(null);
+  };
+
+  const handleUnblockHostFromLog = (entry: DnsLogEntry) => {
+    const cleanDomain = normalizeDomainInput(entry.domain);
+    setRules((prev) =>
+      prev.map((r) =>
+        cleanDomain === r.domain.toLowerCase() ||
+        cleanDomain.endsWith(`.${r.domain.toLowerCase()}`)
+          ? { ...r, enabled: false }
+          : r
+      )
+    );
+    setPurgeNotice(`Đã tắt chặn cho tên miền ${cleanDomain}.`);
+    setLongPressedLog(null);
   };
 
   const handleTogglePackage = (packageName: string) => {
@@ -1299,6 +1379,9 @@ export default function App() {
                 </div>
 
                 {/* Log Stream List */}
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Mẹo: Nhấn giữ (Long press) vào bất kỳ dòng nhật ký nào để thêm nhanh host đó vào danh sách chặn (0.0.0.0).
+                </p>
                 <div className="divide-y divide-slate-100 dark:divide-slate-800/80 max-h-[540px] overflow-y-auto">
                   {filteredLogs.length === 0 ? (
                     <div className="py-12 text-center text-sm text-slate-500 dark:text-slate-400">
@@ -1308,7 +1391,17 @@ export default function App() {
                     filteredLogs.map((item) => (
                       <div
                         key={item.id}
-                        className="py-3 flex items-center justify-between gap-4 text-xs"
+                        onPointerDown={() => handleLogPointerDown(item)}
+                        onPointerUp={handleLogPointerEnd}
+                        onPointerLeave={handleLogPointerEnd}
+                        onPointerCancel={handleLogPointerEnd}
+                        onContextMenu={(e) => handleLogContextMenu(e, item)}
+                        title="Nhấn giữ để thêm vào danh sách chặn"
+                        className={`py-3 px-2 -mx-2 rounded-lg flex items-center justify-between gap-4 text-xs select-none cursor-pointer transition-colors ${
+                          pressingLogId === item.id
+                            ? 'bg-emerald-500/10 dark:bg-emerald-500/15'
+                            : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                        }`}
                       >
                         <div className="min-w-0 space-y-1">
                           <div className="flex items-center gap-2">
@@ -1808,7 +1901,17 @@ export default function App() {
                 {logs.slice(0, 12).map((entry) => (
                   <div
                     key={entry.id}
-                    className="py-2.5 flex items-center justify-between gap-3 text-xs"
+                    onPointerDown={() => handleLogPointerDown(entry)}
+                    onPointerUp={handleLogPointerEnd}
+                    onPointerLeave={handleLogPointerEnd}
+                    onPointerCancel={handleLogPointerEnd}
+                    onContextMenu={(e) => handleLogContextMenu(e, entry)}
+                    title="Nhấn giữ để thêm vào danh sách chặn"
+                    className={`py-2.5 px-2 -mx-2 rounded-lg flex items-center justify-between gap-3 text-xs select-none cursor-pointer transition-colors ${
+                      pressingLogId === entry.id
+                        ? 'bg-emerald-500/10 dark:bg-emerald-500/15'
+                        : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                    }`}
                   >
                     <div className="min-w-0">
                       <p
@@ -2110,6 +2213,88 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* MODAL: LONG PRESS LOG ENTRY TO ADD TO BLOCKLIST */}
+      {longPressedLog && (() => {
+        const cleanHost = normalizeDomainInput(longPressedLog.domain);
+        const isAlreadyBlocked = rules.some(
+          (r) =>
+            r.enabled &&
+            (cleanHost === r.domain.toLowerCase() ||
+              cleanHost.endsWith(`.${r.domain.toLowerCase()}`))
+        );
+        return (
+          <div
+            className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+            onClick={() => setLongPressedLog(null)}
+          >
+            <div
+              className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-bold text-slate-900 dark:text-white font-display">
+                    {isAlreadyBlocked
+                      ? 'Tên miền đã trong danh sách chặn'
+                      : 'Chặn tên miền từ nhật ký?'}
+                  </h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                    {longPressedLog.appName} ({longPressedLog.packageName})
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setLongPressedLog(null)}
+                  aria-label="Đóng"
+                  className="min-h-[36px] min-w-[36px] rounded-lg flex items-center justify-center text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-1.5">
+                <p className="font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400 break-all">
+                  0.0.0.0 {longPressedLog.domain}
+                </p>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  {isAlreadyBlocked
+                    ? 'Host này hiện đang bị chặn về 0.0.0.0. Bạn có thể tắt chặn nếu muốn cho phép kết nối lại.'
+                    : 'Thêm host này vào danh sách chặn (Sinkhole 0.0.0.0) để ngăn mọi kết nối tiếp theo.'}
+                </p>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setLongPressedLog(null)}
+                  className="min-h-[40px] px-4 py-2 rounded-lg text-xs font-medium border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  Hủy
+                </button>
+                {isAlreadyBlocked ? (
+                  <button
+                    type="button"
+                    onClick={() => handleUnblockHostFromLog(longPressedLog)}
+                    className="min-h-[40px] px-4 py-2 rounded-lg text-xs font-medium bg-amber-500 hover:bg-amber-400 text-slate-950 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <span>Bỏ chặn host này</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleBlockHostFromLog(longPressedLog)}
+                    className="min-h-[40px] px-4 py-2 rounded-lg text-xs font-medium bg-rose-600 hover:bg-rose-500 text-white flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Thêm vào danh sách chặn</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
