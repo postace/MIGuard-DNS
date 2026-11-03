@@ -1,0 +1,6 @@
+{
+  "summary": "Kế hoạch thiết kế và xây dựng ứng dụng Android VPN DNS Filter (MiGuard DNS) tối giản, chặn tên miền telemetry/fraud-detection của Xiaomi/MIUI về 0.0.0.0, chuyển tiếp DNS 1.1.1.1 / 8.8.8.8, giám sát log thời gian thực, tùy chỉnh danh sách chặn kèm gợi ý MIUI và lọc theo từng package hệ thống.",
+  "updatedAt": "2026-11-02T15:28:07.508153195Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

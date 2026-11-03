@@ -1,0 +1,1 @@
+{"name":"MiGuard DNS — Android VPN Blocker","description":"Ứng dụng Android VPN cục bộ nhỏ nhẹ giúp chặn tên miền telemetry Xiaomi/MIUI về 0.0.0.0, phân giải DNS 1.1.1.1 / 8.8.8.8, xem log kết nối thời gian thực và lọc theo từng package hệ thống.","requestFramePermissions":[],"majorCapabilities":["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]}
