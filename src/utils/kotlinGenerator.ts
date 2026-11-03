@@ -120,6 +120,8 @@ ${selectedPackages.join(',\n')}
         val builder = Builder()
             .setSession("MiGuard DNS Filter")
             .setMtu(1500)
+            // Bật chế độ Blocking I/O để không bị vòng lặp busy-wait gây hao pin khi chạy ngầm
+            .setBlocking(true)
             .addAddress(VIRTUAL_TUN_IP, 24)
             .addDnsServer(PRIMARY_DNS)
             .addDnsServer(SECONDARY_DNS)
@@ -251,7 +253,7 @@ object DnsPacketHelper {
             0xC0.toByte(), 0x0C.toByte(),
             0x00, 0x01,
             0x00, 0x01,
-            0x00, 0x00, 0x00, 0x3C,
+            0x00, 0x00, 0x0E, 0x10, // TTL = 3600s (1 giờ)
             0x00, 0x04,
             0x00, 0x00, 0x00, 0x00 // 0.0.0.0
         )

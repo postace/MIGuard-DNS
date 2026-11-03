@@ -225,9 +225,10 @@ object VpnRepository {
         return false
     }
 
+    @Volatile private var lastLogPurgeTimeMs = 0L
+
     fun recordDnsLog(domain: String, blocked: Boolean, resolvedTarget: String, latencyMs: Long) {
         val now = System.currentTimeMillis()
-        val cutoff = now - (_retentionDays.value * DAY_MS)
         val entry = DnsLogRecord(
             id = now xor domain.hashCode().toLong(),
             timestampMs = now,
@@ -236,7 +237,14 @@ object VpnRepository {
             resolvedTarget = resolvedTarget,
             latencyMs = latencyMs
         )
-        _logs.value = (listOf(entry) + _logs.value.filter { it.timestampMs >= cutoff }).take(300)
+        val currentLogs = _logs.value
+        if (now - lastLogPurgeTimeMs > 60_000L) {
+            lastLogPurgeTimeMs = now
+            val cutoff = now - (_retentionDays.value * DAY_MS)
+            _logs.value = (listOf(entry) + currentLogs.filter { it.timestampMs >= cutoff }).take(200)
+        } else {
+            _logs.value = (listOf(entry) + currentLogs).take(200)
+        }
     }
 
     /**

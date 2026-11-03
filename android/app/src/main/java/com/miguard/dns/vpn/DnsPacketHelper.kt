@@ -46,7 +46,9 @@ object DnsPacketHelper {
     }
 
     /**
-     * Tạo gói tin phản hồi DNS trả về 0.0.0.0 ngay lập tức cho các tên miền bị chặn
+     * Tạo gói tin phản hồi DNS trả về 0.0.0.0 ngay lập tức cho các tên miền bị chặn.
+     * Đặt TTL = 3600 giây (1 giờ) để hệ thống Android cache kết quả 0.0.0.0,
+     * ngăn ứng dụng Xiaomi/MIUI gửi lại truy vấn liên tục gây tốn pin.
      */
     fun buildSinkholeResponse(requestPacket: ByteArray, requestLength: Int): ByteArray {
         val dnsQuery = extractUdpPayload(requestPacket, requestLength)
@@ -54,7 +56,7 @@ object DnsPacketHelper {
             0xC0.toByte(), 0x0C.toByte(), // Con trỏ tới QNAME tại offset 12
             0x00, 0x01,                   // TYPE A (IPv4)
             0x00, 0x01,                   // CLASS IN
-            0x00, 0x00, 0x00, 0x3C,       // TTL = 60 giây
+            0x00, 0x00, 0x0E, 0x10,       // TTL = 3600 giây (1 giờ) giúp tiết kiệm pin tối đa
             0x00, 0x04,                   // RDLENGTH = 4 bytes
             0x00, 0x00, 0x00, 0x00        // RDATA = 0.0.0.0
         )

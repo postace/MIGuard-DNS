@@ -19,6 +19,10 @@ import java.io.FileOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 /**
@@ -33,10 +37,28 @@ class MiGuardVpnService : VpnService() {
         const val VIRTUAL_TUN_IP = "10.111.222.1"
         private const val NOTIFICATION_CHANNEL_ID = "miguard_vpn_background_channel"
         private const val NOTIFICATION_ID = 1001
+        private const val DNS_CACHE_TTL_MS = 120_000L // Cache phản hồi DNS hợp lệ trong 2 phút để giảm bật radio mạng
+        private const val MAX_DNS_CACHE_SIZE = 256
     }
+
+    private data class CachedDnsResponse(val responsePayload: ByteArray, val expireAtMs: Long)
 
     private var vpnInterface: ParcelFileDescriptor? = null
     @Volatile private var isRunning = false
+    private val dnsCache = ConcurrentHashMap<String, CachedDnsResponse>()
+    private val upstreamAddressCache = ConcurrentHashMap<String, InetAddress>()
+
+    // ThreadPool giới hạn tối đa 4 luồng và tự giải phóng hoàn toàn luồng sau 30s nhàn rỗi
+    private val dnsExecutor = ThreadPoolExecutor(
+        1,
+        4,
+        30L,
+        TimeUnit.SECONDS,
+        LinkedBlockingQueue(128),
+        ThreadPoolExecutor.DiscardOldestPolicy()
+    ).apply {
+        allowCoreThreadTimeOut(true)
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -164,11 +186,19 @@ class MiGuardVpnService : VpnService() {
         val builder = Builder()
             .setSession("MiGuard DNS")
             .setMtu(1500)
+            // QUAN TRỌNG: Bật chế độ Blocking I/O cho TUN descriptor.
+            // Mặc định Android VpnService.Builder ở chế độ non-blocking (O_NONBLOCK), khiến input.read()
+            // trả về lỗi EAGAIN ngay lập tức khi rảnh và gây vòng lặp while(isRunning) chạy 100% CPU ngầm.
+            .setBlocking(true)
             .addAddress(VIRTUAL_TUN_IP, 24)
             .addDnsServer(primaryDns)
             .addDnsServer(secondaryDns)
             .addRoute(primaryDns, 32)
             .addRoute(secondaryDns, 32)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            builder.setMetered(false)
+        }
 
         selectedPkgs.forEach { pkg ->
             try {
@@ -199,9 +229,23 @@ class MiGuardVpnService : VpnService() {
                     if (length > 0) {
                         val packetCopy = buffer.copyOf(length)
                         processPacket(packetCopy, length, output)
+                    } else if (length == 0) {
+                        // Phòng hờ trường hợp ROM trả về 0 byte ở chế độ non-blocking
+                        Thread.sleep(50)
+                    } else {
+                        // EOF (length < 0) khi đóng giao diện TUN
+                        if (!isRunning) break
+                        Thread.sleep(50)
                     }
+                } catch (_: InterruptedException) {
+                    break
                 } catch (_: Exception) {
                     if (!isRunning) break
+                    try {
+                        Thread.sleep(50)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
                 }
             }
         }
@@ -209,54 +253,88 @@ class MiGuardVpnService : VpnService() {
 
     private fun processPacket(rawPacket: ByteArray, length: Int, tunOutput: FileOutputStream) {
         val domain = DnsPacketHelper.extractDomainName(rawPacket, length) ?: return
+        val normalizedDomain = domain.lowercase()
         val startTime = System.currentTimeMillis()
 
-        if (VpnRepository.shouldBlockDomain(domain)) {
+        if (VpnRepository.shouldBlockDomain(normalizedDomain)) {
             val sinkholePacket = DnsPacketHelper.buildSinkholeResponse(rawPacket, length)
             synchronized(tunOutput) {
                 tunOutput.write(sinkholePacket)
             }
             val elapsed = (System.currentTimeMillis() - startTime).coerceAtLeast(1L)
             VpnRepository.recordDnsLog(
-                domain = domain,
+                domain = normalizedDomain,
                 blocked = true,
                 resolvedTarget = "0.0.0.0",
                 latencyMs = elapsed
             )
-        } else {
-            val upstreamDns = VpnRepository.primaryDns.value
-            thread(isDaemon = true) {
-                try {
-                    DatagramSocket().use { socket ->
-                        protect(socket)
-                        socket.soTimeout = 3000
-                        val payload = DnsPacketHelper.extractUdpPayload(rawPacket, length)
-                        val serverAddr = InetAddress.getByName(upstreamDns)
-                        socket.send(DatagramPacket(payload, payload.size, serverAddr, 53))
+            return
+        }
 
-                        val respBuf = ByteArray(1500)
-                        val respPacket = DatagramPacket(respBuf, respBuf.size)
-                        socket.receive(respPacket)
+        val payload = DnsPacketHelper.extractUdpPayload(rawPacket, length)
+        if (payload.size < 12) return
 
-                        val wrapped = DnsPacketHelper.wrapUdpResponse(
-                            originalRequest = rawPacket,
-                            dnsResponse = respBuf,
-                            dnsLength = respPacket.length
-                        )
-                        synchronized(tunOutput) {
-                            tunOutput.write(wrapped)
+        // Kiểm tra RAM DNS Cache trước khi đánh thức radio mạng (4G/5G/Wi-Fi)
+        val cached = dnsCache[normalizedDomain]
+        if (cached != null && cached.expireAtMs > startTime && cached.responsePayload.size >= 12) {
+            val cachedCopy = cached.responsePayload.copyOf()
+            // Đồng bộ DNS Transaction ID (2 byte đầu) với gói tin yêu cầu
+            cachedCopy[0] = payload[0]
+            cachedCopy[1] = payload[1]
+            val wrapped = DnsPacketHelper.wrapUdpResponse(
+                originalRequest = rawPacket,
+                dnsResponse = cachedCopy,
+                dnsLength = cachedCopy.size
+            )
+            synchronized(tunOutput) {
+                tunOutput.write(wrapped)
+            }
+            return
+        }
+
+        val upstreamDns = VpnRepository.primaryDns.value
+        dnsExecutor.execute {
+            try {
+                DatagramSocket().use { socket ->
+                    protect(socket)
+                    socket.soTimeout = 2500
+                    val serverAddr = upstreamAddressCache.getOrPut(upstreamDns) {
+                        InetAddress.getByName(upstreamDns)
+                    }
+                    socket.send(DatagramPacket(payload, payload.size, serverAddr, 53))
+
+                    val respBuf = ByteArray(1500)
+                    val respPacket = DatagramPacket(respBuf, respBuf.size)
+                    socket.receive(respPacket)
+
+                    if (respPacket.length >= 12) {
+                        if (dnsCache.size >= MAX_DNS_CACHE_SIZE) {
+                            dnsCache.clear()
                         }
-                        val elapsed = (System.currentTimeMillis() - startTime).coerceAtLeast(1L)
-                        VpnRepository.recordDnsLog(
-                            domain = domain,
-                            blocked = false,
-                            resolvedTarget = upstreamDns,
-                            latencyMs = elapsed
+                        dnsCache[normalizedDomain] = CachedDnsResponse(
+                            responsePayload = respBuf.copyOf(respPacket.length),
+                            expireAtMs = System.currentTimeMillis() + DNS_CACHE_TTL_MS
                         )
                     }
-                } catch (_: Exception) {
-                    // Timeout hoặc không có kết nối mạng
+
+                    val wrapped = DnsPacketHelper.wrapUdpResponse(
+                        originalRequest = rawPacket,
+                        dnsResponse = respBuf,
+                        dnsLength = respPacket.length
+                    )
+                    synchronized(tunOutput) {
+                        tunOutput.write(wrapped)
+                    }
+                    val elapsed = (System.currentTimeMillis() - startTime).coerceAtLeast(1L)
+                    VpnRepository.recordDnsLog(
+                        domain = normalizedDomain,
+                        blocked = false,
+                        resolvedTarget = upstreamDns,
+                        latencyMs = elapsed
+                    )
                 }
+            } catch (_: Exception) {
+                // Timeout hoặc không có kết nối mạng
             }
         }
     }
@@ -269,10 +347,12 @@ class MiGuardVpnService : VpnService() {
         } catch (_: Exception) {
         }
         vpnInterface = null
+        dnsCache.clear()
     }
 
     override fun onDestroy() {
         stopVpnTunnel(persistState = false)
+        dnsExecutor.shutdownNow()
         super.onDestroy()
     }
 }
