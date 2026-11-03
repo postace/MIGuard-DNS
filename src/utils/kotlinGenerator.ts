@@ -328,8 +328,7 @@ object DnsPacketHelper {
 
 export function generateAndroidManifestXml(): string {
   return `<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.miguard.dns">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -539,6 +538,13 @@ set -e
 
 mkdir -p MiGuardDNS/android/app/src/main/java/com/miguard/dns/vpn
 mkdir -p MiGuardDNS/.github/workflows
+
+cat << 'EOF' > MiGuardDNS/android/gradle.properties
+org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+android.useAndroidX=true
+android.nonTransitiveRClass=true
+kotlin.code.style=official
+EOF
 
 cat << 'EOF' > MiGuardDNS/android/settings.gradle.kts
 pluginManagement {
